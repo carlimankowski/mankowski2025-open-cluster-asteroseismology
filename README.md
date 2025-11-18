@@ -1,0 +1,1 @@
+# mankowski2025-open-cluster-asteroseismology
