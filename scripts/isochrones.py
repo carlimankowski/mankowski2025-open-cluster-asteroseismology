@@ -22,12 +22,11 @@ SAVE_DIR = "/Users/carlimankowski/Downloads/revision_1/"
 # ── MIST setup ──
 mist = get_ichrone('mist', bands=['G', 'BP', 'RP'])
 
-def patched_interp_value(self, pars, props):
-    i0, i1, i2, i3, i4 = self.param_index_order
-    pars = [pars[i0], pars[i1], pars[i2]]
-    return self.model_grid.interp(pars, "all")
-
-mist.interp_value = types.MethodType(patched_interp_value, mist)
+# NOTE: the previous monkeypatch of mist.interp_value scrambled the isochrone
+# (out-of-order / duplicated points -> the spurious "curl" Jamie flagged).
+# The stock isochrones API returns correctly EEP-ordered G/BP/RP mags, so we
+# use it directly.
+_ = types  # (import kept for compatibility)
 
 # Gaia DR3 extinction coefficients
 K_G  = 2.74
@@ -67,53 +66,52 @@ def get_cluster_data(df, cluster_pattern):
     ])
     max_abs_z = np.nanmax(z_stack, axis=0)
 
-    # Bad: max|z| >= 2
-    bad_mask = np.isfinite(max_abs_z) & (max_abs_z >= 2.0)
+    # Membership: keep stars consistent in parallax AND proper motion (max|z| < 2).
+    # Field contaminants are dropped (not plotted) so the cluster sequence is clean,
+    # as in recent Gaia cluster-CMD papers.
+    member = np.isfinite(max_abs_z) & (max_abs_z < 2.0)
+    good = good & member
 
-    print(f"  {cluster_pattern}: {len(dfc)} stars, {good.sum()} plotted, {(good & bad_mask).sum()} non-members")
-    return color, gmag, good, bad_mask
+    # distance modulus from the CLEAN members (robust to field contamination)
+    plx_clean = pd.to_numeric(dfc["Plx"], errors="coerce").to_numpy()[good]
+    med_plx_clean = np.nanmedian(plx_clean)
+    dm_clean = 5 * np.log10(1000.0 / med_plx_clean) - 5 if med_plx_clean > 0 else np.nan
+    print(f"  {cluster_pattern}: {len(dfc)} stars -> {good.sum()} clean members "
+          f"| median plx={med_plx_clean:.3f} mas -> dm={dm_clean:.2f}")
+    return color, gmag, good, ~member
 
-def plot_isochrones(color, gmag, good, bad_mask, cluster_label, ages_gyr, feh, ebv, dm,
-                    xlim, ylim, savefile, label_text=None, iso_alpha=None, label_frac=None):
+def plot_isochrones(color, gmag, good, cluster_label, seismic_ages, lit_ages,
+                    feh, ebv, dm, xlim, ylim, savefile):
+    """Solid green = SEISMIC age range (this work, 2 curves); dashed orange =
+    LITERATURE ages (3 curves). Distance from member parallax; reddening/metallicity
+    chosen so the isochrone traces the observed cluster sequence."""
     fig, ax = plt.subplots(figsize=(9, 8))
 
-    # Members
     ax.scatter(color[good], gmag[good], s=15, color='gray',
-               edgecolors='k', linewidth=0.5, alpha=0.8, label=cluster_label)
+               edgecolors='k', linewidth=0.5, alpha=0.75, label=cluster_label, zorder=1)
 
-    # Non-members
-    bad_good = good & bad_mask
-    if bad_good.any():
-        ax.scatter(color[bad_good], gmag[bad_good],
-                   marker='x', s=80, linewidth=2, color='red', label='Likely non-members')
+    def iso_curve(age):
+        iso = mist.isochrone(np.log10(age * 1e9), feh)
+        mabs = iso['G_mag'].to_numpy()
+        keep = (mabs > -3) & (mabs < 10)          # MS -> turnoff -> lower RGB (drop PMS/tip)
+        col = ((iso['BP_mag'] - iso['RP_mag']).to_numpy()[keep]) + (K_BP - K_RP) * ebv
+        mag = mabs[keep] + dm + K_G * ebv
+        return col, mag
 
-    # Isochrones
-    colors_map = plt.cm.viridis(np.linspace(0, 1, len(ages_gyr)))
-    for i, age in enumerate(ages_gyr):
-        logage = np.log10(age * 1e9)
-        iso = mist.isochrone(logage, feh)
-        col_fit = (iso['BP_mag'] - iso['RP_mag']) + (K_BP - K_RP) * ebv
-        mag_fit = iso['G_mag'] + dm + K_G * ebv
+    for k, age in enumerate(seismic_ages):
+        c, m = iso_curve(age)
+        lab = fr'Seismic (this work): {min(seismic_ages):.2f}--{max(seismic_ages):.2f} Gyr' if k == 0 else None
+        ax.plot(c, m, color='#2ca02c', lw=2.6, ls='-', zorder=4, label=lab)
+    for k, age in enumerate(lit_ages):
+        c, m = iso_curve(age)
+        lab = fr'Literature: {min(lit_ages):.2f}--{max(lit_ages):.2f} Gyr' if k == 0 else None
+        ax.plot(c, m, color='#ff7f0e', lw=2.0, ls='--', alpha=0.85, zorder=3, label=lab)
 
-        alpha = iso_alpha.get(age, 1.0) if iso_alpha else 1.0
-        legend_label = f"{age:.2f} Gyr"
-
-        ax.plot(col_fit, mag_fit, color=colors_map[i], lw=2.5, alpha=alpha, label=legend_label)
-
-        # Inline labels
-        if label_text and age in label_text and label_text[age]:
-            frac = label_frac.get(age, 0.25) if label_frac else 0.25
-            frac = max(0.0, min(1.0, frac))
-            idx = int(frac * (len(col_fit) - 1))
-            ax.text(col_fit.iloc[idx] + 0.02, mag_fit.iloc[idx] - 0.10,
-                    label_text[age], fontsize=8, color=colors_map[i], alpha=alpha)
-
-    ax.invert_yaxis()
     ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    ax.set_ylim(*ylim)                     # given as (faint, bright) -> inverted display
     ax.set_xlabel(r'$G_{\rm BP} - G_{\rm RP}$ (mag)')
     ax.set_ylabel(r'$G$ (mag)')
-    ax.legend(fontsize=9, loc='upper left')
+    ax.legend(fontsize=10, loc='upper left')
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(SAVE_DIR + savefile, dpi=200, bbox_inches='tight')
@@ -126,16 +124,14 @@ def plot_isochrones(color, gmag, good, bad_mask, cluster_label, ages_gyr, feh, e
 print("\n=== NGC 752 ===")
 color, gmag, good, bad = get_cluster_data(df, "NGC_752")
 plot_isochrones(
-    color, gmag, good, bad,
+    color, gmag, good,
     cluster_label="NGC 752",
-    ages_gyr=[1.30, 1.40, 1.50, 1.60],
-    feh=0.1,
-    ebv=0.035, dm=8.30,
+    seismic_ages=[1.45, 1.71],
+    lit_ages=[1.00, 1.30, 1.60],
+    feh=0.0,                          # NGC 752 ~solar (literature)
+    ebv=0.04, dm=8.22,                # dm from median member parallax (2.27 mas)
     xlim=(0.0, 1.5), ylim=(14, 8),
     savefile="ngciso.png",
-    label_text={1.30: "Literature", 1.55: "Seismic Age", 1.60: "Literature"},
-    iso_alpha={1.30: 1.0, 1.40: 1.0, 1.50: 1.0, 1.60: 1.0},
-    label_frac={1.30: 0.30, 1.60: 0.30}
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -144,23 +140,14 @@ plot_isochrones(
 print("\n=== Theia 6046 ===")
 color, gmag, good, bad = get_cluster_data(df, "Theia_6046")
 plot_isochrones(
-    color, gmag, good, bad,
+    color, gmag, good,
     cluster_label="Theia 6046",
-    ages_gyr=[0.3, 0.5, 0.7, 1.0, 1.5, 3.7],
-    feh=-0.06,
-    ebv=0.3, dm=9.9,
+    seismic_ages=[2.59, 6.69],
+    lit_ages=[2.50, 3.50, 4.50],
+    feh=-0.13,                        # median GSP-Spec member metallicity
+    ebv=0.30, dm=9.61,                # dm from median member parallax (1.19 mas)
     xlim=(0.2, 2.5), ylim=(17, 9),
     savefile="theiaiso.png",
-    label_text={
-        0.5: "~ Seismic Range",
-        0.7: "~ Seismic Range",
-        3.7: "Literature Age",
-    },
-    iso_alpha={
-        0.3: 0.20, 0.5: 1.0, 0.7: 1.0,
-        1.0: 0.20, 1.5: 0.20, 3.7: 1.0,
-    },
-    label_frac={0.5: 0.30, 0.7: 0.30, 3.7: 0.32}
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -169,20 +156,14 @@ plot_isochrones(
 print("\n=== Casado-Alessi 1 ===")
 color, gmag, good, bad = get_cluster_data(df, "Casado-Alessi_1")
 plot_isochrones(
-    color, gmag, good, bad,
+    color, gmag, good,
     cluster_label="Casado-Alessi 1",
-    ages_gyr=[0.78, 0.80, 1.01, 1.45],
-    feh=0.02,
-    ebv=0.03, dm=9.0,
+    seismic_ages=[0.88, 1.09],
+    lit_ages=[0.69, 1.07, 1.45],
+    feh=0.0,                          # ~solar; reddens lower MS to trace the data
+    ebv=0.12, dm=9.24,                # dm from median member parallax (1.42 mas)
     xlim=(0.0, 1.5), ylim=(16, 8),
     savefile="casadoiso.png",
-    label_text={
-        0.78: "Literature",
-        1.01: "Seismic Age",
-        1.45: "Literature",
-    },
-    iso_alpha={0.78: 1.0, 0.80: 1.0, 1.01: 1.0, 1.45: 1.0},
-    label_frac={0.78: 0.30, 1.01: 0.30, 1.45: 0.30}
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -196,20 +177,14 @@ color, gmag, good, bad = get_cluster_data(df, "Theia_844")
 # E(B-V) ~ 0.12 (moderate reddening in Cygnus direction)
 # [Fe/H] ~ 0.0 (solar, averaging available spectroscopic values)
 plot_isochrones(
-    color, gmag, good, bad,
+    color, gmag, good,
     cluster_label="Theia 844",
-    ages_gyr=[0.15, 0.25, 0.35, 0.45],
-    feh=0.0,
-    ebv=0.12, dm=9.12,
-    xlim=(0.0, 2.0), ylim=(17, 8),
+    seismic_ages=[0.24, 0.28],
+    lit_ages=[0.10, 0.27, 0.44],
+    feh=0.0,                          # ~solar (GSP-Spec member median +0.09)
+    ebv=0.12, dm=9.09,                # dm from median member parallax (1.52 mas)
+    xlim=(0.0, 2.0), ylim=(17, 6.5),  # extended up so the young turnoff is visible
     savefile="theia844iso.png",
-    label_text={
-        0.25: "~ Seismic Age",
-        0.35: "~ Literature",
-        0.45: "~ Literature",
-    },
-    iso_alpha={0.15: 0.5, 0.25: 1.0, 0.35: 1.0, 0.45: 1.0},
-    label_frac={0.25: 0.30, 0.35: 0.30, 0.45: 0.30}
 )
 
 print("\nAll 4 plots generated!")

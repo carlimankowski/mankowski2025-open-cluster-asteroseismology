@@ -14,7 +14,7 @@ Analysis code and data for "Expanding Asteroseismic Studies in Star Clusters Usi
 7. `07_isochrones.ipynb` — MIST isochrone CMD plots for NGC 752, Theia 6046, Casado Alessi 1, and Theia 844
 
 ### `data/`
-- `seismic_results.csv` — Final asteroseismic parameters for all 21 targets
+- `seismic_results.csv` — Final asteroseismic parameters for all 23 targets (13 confirmed + 10 tentative detections)
 - `age_results.csv` — Per star and cluster level age estimates from 4 grids
 - `measured_dnu_values.csv` — Hand measured dnu values from echelle diagram analysis
 - `target_list.csv` — Initial target list with cluster assignments
@@ -23,7 +23,15 @@ Analysis code and data for "Expanding Asteroseismic Studies in Star Clusters Usi
 ### `scripts/`
 - `run_pysyd_batch.py` — Batch PySYD execution for all targets
 - `run_pysyd_plots.py` — Diagnostic plot generation for PySYD results
+- `diagnostic_panels.py` — Per-target diagnostic panels (power spectrum with two-component Harvey background, background-corrected SNR, echelle) used in Appendix C
+- `validate_pipeline.py` — End-to-end pipeline validation on the known Kepler oscillator KIC 10323222 (recovers numax to ~1%)
 - `isochrones.py` — MIST isochrone CMD plot generation
+
+## Revision notes
+- Backgrounds are fit with a two-component Harvey profile plus white noise (Kallinger et al. 2014 form), fit in log space over the full spectrum with the oscillation region masked.
+- TESS-SPOC 2-minute data are used in preference to QLP where available (6 of 23 targets).
+- Detections are reported as 13 confirmed + 10 tentative rather than treated equally.
+- Surface-gravity validation uses the Andrae et al. (2023) machine-learning log g as the primary check, with GSP-Spec as a secondary comparison.
 
 ## Clusters with Multiple Detections
 | Cluster | N | Seismic Age (Gyr) | Literature Age (Gyr) |
